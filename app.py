@@ -15,7 +15,7 @@ if not GOOGLE_API_KEY:
 
 # Configure Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-1.0-pro')
 
 # Initialize session state
 if 'previous_places' not in st.session_state:
