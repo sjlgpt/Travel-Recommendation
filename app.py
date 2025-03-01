@@ -14,31 +14,49 @@ if not GOOGLE_API_KEY:
     st.stop()
 
 # Configure Gemini
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.0-pro')
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = None
+    
+    # Try different model versions in order of preference
+    model_versions = ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro']
+    
+    for version in model_versions:
+        try:
+            model = genai.GenerativeModel(version)
+            # Test if model works
+            test_response = model.generate_content('Test')
+            # st.success(f"Successfully connected using {version} model")
+            break
+        except Exception:
+            continue
+            
+    if not model:
+        raise Exception("No available Gemini models found")
+        
+except Exception as e:
+    st.error(f"Error configuring Gemini: {str(e)}")
+    st.stop()
 
 # Initialize session state
 if 'previous_places' not in st.session_state:
     st.session_state.previous_places = []
 if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []  # Will now store dicts with 'query' and 'response' keys
 
 def validate_response(response_text):
     try:
         # Clean any potential markdown or extra whitespace
-        response_text = re.sub(r'^```.*\n', '', response_text)
-        response_text = re.sub(r'\n```$', '', response_text)
+        response_text = re.sub(r'^.*\n', '', response_text)
+        response_text = re.sub(r'\n$', '', response_text)
         response_text = response_text.strip()
-        
         data = json.loads(response_text)
         required_keys = ["name", "description", "cost", "timing", "best_time", "tips"]
         
         if "places" not in data:
             return None
-            
         if not isinstance(data["places"], list) or len(data["places"]) == 0:
             return None
-            
         for place in data["places"]:
             if not all(key in place and place[key] for key in required_keys):
                 return None
@@ -51,9 +69,8 @@ def validate_response(response_text):
 def get_places_recommendations(query):
     try:
         prompt = f"""Based on this query: '{query}'
-
 Please provide exactly 5 popular tourist places that match the query criteria.
-Format your response STRICTLY as shown below:
+Format your response as valid JSON with the following structure:
 {{
     "places": [
         {{
@@ -65,46 +82,23 @@ Format your response STRICTLY as shown below:
             "tips": "One important travel tip"
         }}
     ]
-}}
+}}"""
 
-Ensure:
-1. Response is valid JSON
-2. All 5 places are included
-3. All fields are filled
-4. No additional text outside JSON
-5. Costs are in INR format
-
-Generate only the JSON response, no other text."""
-
-        response = model.generate_content(prompt, generation_config={
-            'temperature': 0.7,
-            'top_p': 1,
-            'top_k': 32,
-            'max_output_tokens': 2048,
-        })
-        
-        # Clean the response text to ensure valid JSON
+        response = model.generate_content(prompt)
         response_text = response.text.strip()
-        if response_text.startswith('```json'):
-            response_text = response_text.replace('```json', '').replace('```', '')
-        response_text = response_text.strip()
+        
+        # Clean the response text
+        if 'json' in response_text:
+            response_text = re.sub(r'^json\s*|\s*```$', '', response_text)
         
         data = validate_response(response_text)
-        if data:
-            return data
-        else:
+        if not data:
             raise ValueError("Invalid response format from API")
+        return data
             
     except Exception as e:
         st.error(f"Error generating recommendations: {str(e)}")
         return None
-
-def filter_places(places, num):
-    return places[:min(num, len(places))]
-
-def extract_number_from_query(query):
-    numbers = re.findall(r'\d+', query)
-    return int(numbers[0]) if numbers else 5
 
 def extract_price(cost_string):
     """Extract numerical price from cost string"""
@@ -113,6 +107,13 @@ def extract_price(cost_string):
         # Remove commas and convert to float
         return float(matches[0].replace(',', ''))
     return float('inf')  # Return infinity if no price found
+
+def filter_places(places, num):
+    return places[:min(num, len(places))]
+
+def extract_number_from_query(query):
+    numbers = re.findall(r'\d+', query)
+    return int(numbers[0]) if numbers else 5
 
 def sort_places_by_price(places, ascending=True):
     """Sort places by their price"""
@@ -141,16 +142,21 @@ with st.expander("📝 Example Queries"):
 user_query = st.text_input("🔍 Enter your query:")
 
 if user_query:
-    st.session_state.chat_history.append(("You", user_query))
+    # Create new chat entry
+    chat_entry = {
+        "query": user_query,
+        "response": None
+    }
     
     with st.spinner("Generating recommendations..."):
-        # Check if this is a follow-up query
+        # Handle follow-up queries
         if any(x in user_query.lower() for x in ["out of these", "sort", "price"]):
             if not st.session_state.previous_places:
                 st.warning("Please make an initial query first!")
             else:
                 places_data = process_follow_up_query(user_query, st.session_state.previous_places)
                 if places_data:
+                    chat_entry["response"] = places_data
                     if "sort" in user_query.lower():
                         st.success("Sorted places by price!")
                     else:
@@ -158,20 +164,33 @@ if user_query:
         else:
             places_data = get_places_recommendations(user_query)
             if places_data:
+                chat_entry["response"] = places_data
                 st.session_state.previous_places = places_data["places"]
                 st.success("Found the following recommendations!")
 
+        # Display results
         if places_data and places_data["places"]:
             for idx, place in enumerate(places_data["places"], 1):
-                with st.expander(f"#{idx} {place['name']} 🏛️"):
-                    st.markdown(f"**Description:** {place['description']}")
-                    st.markdown(f"**💰 Cost:** {place['cost']}")
-                    st.markdown(f"**⏰ Timing:** {place['timing']}")
-                    st.markdown(f"**🗓️ Best Time to Visit:** {place['best_time']}")
-                    st.markdown(f"**💡 Travel Tips:** {place['tips']}")
-                    
-# Display chat history
+                with st.expander(f"#{idx} {place['name']} 🏛"):
+                    st.markdown(f"*Description:* {place['description']}")
+                    st.markdown(f"💰 Cost:** {place['cost']}")
+                    st.markdown(f"⏰ Timing:** {place['timing']}")
+                    st.markdown(f"🗓 Best Time to Visit:** {place['best_time']}")
+                    st.markdown(f"💡 Travel Tips:** {place['tips']}")
+    
+    # Add the chat entry to history after getting response
+    st.session_state.chat_history.append(chat_entry)
+
+# Replace the old chat history display with this new version
 with st.sidebar:
     st.subheader("💬 Chat History")
-    for role, message in st.session_state.chat_history:
-        st.text(f"{role}: {message}")
+    for entry in reversed(st.session_state.chat_history):  # Show newest first
+        with st.expander(f"🗣 {entry['query']}", expanded=False):
+            if entry['response'] and entry['response'].get('places'):
+                for idx, place in enumerate(entry['response']['places'], 1):
+                    st.markdown(f"""
+                    *{idx}. {place['name']}*  
+                    💰 {place['cost']}
+                    """)
+            else:
+                st.info("No response generated")
